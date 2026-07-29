@@ -1024,3 +1024,54 @@ console.log('== pendingEdits: persistence, restore, prune ==');
     st.docs = st.docs.filter(d => d.id !== 'pdocA' && d.id !== 'pdocB');
     D.setActiveDoc('');
 })();
+
+// ==================================================================
+// v0.14.2 — applied-record preservation on history splice
+// ==================================================================
+console.log('== spliceHistory: applied edits keep a [STATE] record ==');
+(function () {
+    const st = D.getSettings();
+    const doc = D.ensureDocShape({ id: 'spliceD', name: 'Splice Doc', text: 'Rule: the hero never lies.', presetId: 'seed_pe_maker' });
+    const s = D.sess(doc);
+    s.history.push(
+        { role: 'user', content: 'change the rule' },                                                        // 0
+        { role: 'assistant', content: 'a', swipes: [{ content: 'a', think: '' }], swipeId: 0 },              // 1
+        { role: 'note', content: 'Applied: 1 edit(s) \u2192 "Splice Doc".' },                                 // 2
+    );
+    st.docs.push(doc);
+    D.setActiveDoc(doc.id);
+    D.setPendingEdits([
+        { type: 'replace', find: 'never lies', replace: 'never deceives', status: 'applied', batch: 1, fromSess: 1, fromMsg: 1 },
+        { type: 'append', replace: 'TAIL', status: 'pending', batch: 1, fromSess: 1, fromMsg: 1 },
+        { type: 'append', replace: 'EARLIER', status: 'pending', batch: 0, fromSess: 1, fromMsg: 0 },
+    ]);
+
+    // Retry-style tail splice: removes assistant + applied-note; the APPLIED
+    // card's document change stays live, so a replacement note must appear.
+    D.spliceHistory(doc, 1, Infinity);
+    ok(s.history.length === 2 && s.history[1].role === 'note' && /1 edit\(s\).*remain applied/.test(s.history[1].content),
+        'tail splice leaves a [STATE] note recording the still-live applied edit', s.history.map(h => h.role + ': ' + h.content));
+    ok(/Undo to revert/.test(s.history[1].content), 'the note points at Undo as the revert path');
+    ok(!D.getPendingEdits().some(e => e.status === 'applied'), 'the applied card is retired (its record is the note now)');
+    ok(!D.getPendingEdits().some(e => e.replace === 'TAIL'), 'pending cards from the removed reply are dropped as before');
+
+    // Negative: a splice that removes NO applied cards leaves no note.
+    const before = s.history.length;
+    D.spliceHistory(doc, 1, 1); // remove the replacement note itself
+    ok(s.history.length === before - 1 && !s.history.some(h => /remain applied/.test(h.content || '')),
+        'splice with no applied casualties adds no noise note');
+
+    // Negative: dropping only PENDING cards never triggers the note.
+    s.history.push(
+        { role: 'user', content: 'u2' },                                                                     // 1 -> index 1 now
+        { role: 'assistant', content: 'b', swipes: [{ content: 'b', think: '' }], swipeId: 0 },              // 2
+    );
+    D.setPendingEdits([{ type: 'append', replace: 'P', status: 'pending', batch: 2, fromSess: 1, fromMsg: 2 }]);
+    D.spliceHistory(doc, 2, Infinity);
+    ok(!s.history.some(h => /remain applied/.test(h.content || '')) && D.getPendingEdits().length === 0,
+        'pending-only casualties: dropped silently (their source reply is gone — by design)');
+
+    // clean up
+    st.docs = st.docs.filter(d => d.id !== 'spliceD');
+    D.setActiveDoc('');
+})();

@@ -648,6 +648,30 @@
         return arr;
     }
 
+    // Shared by every interactive history-splice path (retry / delete-last /
+    // edit-message / delete-message / clear). adjustStampsForSplice drops the
+    // cards whose SOURCE message is removed — correct — but cards with status
+    // "applied…" represent edits that are ALREADY COMMITTED to the document
+    // and stay committed after the splice (the undo batch survives). Dropping
+    // them silently, together with the "[STATE] Applied:" note the splice
+    // removes, erased the only record that the document had changed — so a
+    // retry could re-propose the same edit and apply it ON TOP of the
+    // still-live one (duplicate appends). Keep the feedback loop closed:
+    // after splicing, leave a [STATE] note for any applied edits whose source
+    // message was just removed. (The 80-message cap is deliberately exempt:
+    // it is a rolling window and the document is the source of truth there.)
+    function spliceHistory(doc, idx, deleteCount) {
+        const s = sess(doc);
+        if (!s) return;
+        const kept = adjustStampsForSplice(pendingEdits, s.id, idx, deleteCount);
+        const droppedApplied = pendingEdits.filter(e => e && !kept.includes(e) && String(e.status || '').startsWith('applied')).length;
+        setPendingEdits(kept);
+        s.history.splice(idx, deleteCount);
+        if (droppedApplied) {
+            s.history.push({ role: 'note', content: droppedApplied + ' edit(s) from the removed message(s) remain applied to the document \u2014 Undo to revert.' });
+        }
+    }
+
     // Append an entry to a specific session, enforcing the 80-entry cap and
     // shifting/dropping proposal stamps when the cap splices the front. Used by
     // pushHistory (active session) and by the mid-generation switch path (the
@@ -1970,8 +1994,7 @@
         // (e.g. after an error), just generate for it.
         if (h.length && h[h.length - 1].role === 'user') { await runGeneration(); return; }
         if (i < 0) { toast('Nothing to retry yet.', 'warning'); return; }
-        setPendingEdits(adjustStampsForSplice(pendingEdits, sess(doc).id, i, Infinity));
-        h.splice(i);
+        spliceHistory(doc, i, Infinity);
         persist();
         renderHistory();
         renderEditCards();
@@ -1986,8 +2009,7 @@
         let i = h.length - 1;
         while (i >= 0 && h[i].role !== 'user') i--;
         if (i < 0) { toast('Nothing to delete.', 'warning'); return; }
-        setPendingEdits(adjustStampsForSplice(pendingEdits, sess(doc).id, i, Infinity));
-        h.splice(i);
+        spliceHistory(doc, i, Infinity);
         persist();
         renderHistory();
         renderEditCards();
@@ -2001,8 +2023,7 @@
         if (!h[idx] || h[idx].role !== 'user') return;
         if (idx < h.length - 1 && !confirm('Edit this message? Everything after it in this conversation will be removed.')) return;
         const text = h[idx].content;
-        setPendingEdits(adjustStampsForSplice(pendingEdits, sess(doc).id, idx, Infinity));
-        h.splice(idx);
+        spliceHistory(doc, idx, Infinity);
         persist();
         renderHistory();
         renderEditCards();
@@ -2018,8 +2039,7 @@
         const h = sess(doc).history;
         if (!h[idx]) return;
         if (!confirm('Delete this message from the agent conversation?')) return;
-        setPendingEdits(adjustStampsForSplice(pendingEdits, sess(doc).id, idx, 1));
-        h.splice(idx, 1);
+        spliceHistory(doc, idx, 1);
         persist();
         renderHistory();
         renderEditCards();
@@ -2031,8 +2051,7 @@
         if (!doc) return;
         const cur = sess(doc);
         if (!confirm('Clear session "' + cur.name + '" of "' + doc.name + '"? The document itself is untouched.')) return;
-        setPendingEdits(adjustStampsForSplice(pendingEdits, cur.id, 0, Infinity));
-        cur.history = [];
+        spliceHistory(doc, 0, Infinity);
         persist();
         renderHistory();
         renderEditCards();
@@ -4408,7 +4427,7 @@
             adjustStampsForSplice, editIdentityKey, findAutoSuperseded, resolveSpanConflicts, buildBackupPayload, parseBackupPayload, mergeBackupIntoSettings, buildMessages, blockTokensFor, docBlock, refBlock,
             getSettings: () => settings,
             getPendingEdits: () => pendingEdits,
-            setPendingEdits, loadPendingFromDoc, prunePendingEdits, setActiveDoc,
+            setPendingEdits, loadPendingFromDoc, prunePendingEdits, setActiveDoc, spliceHistory,
         };
     } catch (e) { /* ignore */ }
 })();
