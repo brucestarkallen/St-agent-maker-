@@ -1927,7 +1927,10 @@
         } catch (err) {
             busy.remove();
             console.error(LOG, err);
-            let emsg = String(err?.message || err);
+            // ConnectionManagerRequestService wraps provider failures as
+            // Error('API request failed', { cause }) — surface the CAUSE (401,
+            // context-length, model-not-found…), not just the wrapper.
+            let emsg = String(err?.cause?.message || err?.message || err);
             if (Number(settings.maxTokens) > 32768) emsg += ' \u2014 if this is a provider rejection, try lowering Max tokens.';
             addBubble('note', 'Error: ' + emsg);
             toast(emsg, 'error');
