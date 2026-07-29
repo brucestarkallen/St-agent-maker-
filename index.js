@@ -24,7 +24,7 @@
     // it orphans all real user data. The rename only touched display strings.
     const MODULE = 'loreAgent';
     const LOG = '[LoreAgent]';
-    const VERSION = '0.14.1';
+    const VERSION = '0.14.2';
 
     // ------------------------------------------------------------------
     // Seeded presets (placeholders — paste your real instructions via the
