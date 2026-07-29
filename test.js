@@ -1105,3 +1105,40 @@ console.log('== buildMessages: role merging (strict-alternation providers) ==');
     const mm2 = D.buildMessages(mdoc2);
     ok(mm2.length === 4 && mm2.map(m => m.role).join(',') === 'system,user,assistant,user', 'already-alternating history passes through untouched');
 })();
+
+// ==================================================================
+// v0.14.2 — old docedits blocks stripped from resent history
+// ==================================================================
+console.log('== buildMessages: old proposal blocks stripped, latest kept ==');
+(function () {
+    const blk = (n) => '<docedits>\n[{"find":"f' + n + '","replace":"r' + n + '","reason":"x"}]\n</docedits>';
+    const hdoc = D.ensureDocShape({ id: 'stripD', name: 'Strip Doc', text: 'BODY', presetId: 'seed_pe_maker' });
+    const hs = D.sess(hdoc);
+    hs.history.push(
+        { role: 'user', content: 'u1' },
+        { role: 'assistant', content: 'first reply prose\n' + blk(1) },
+        { role: 'user', content: 'u2' },
+        { role: 'assistant', content: 'second reply prose\n' + blk(2) },
+        { role: 'user', content: 'u3' },
+    );
+    const sm = D.buildMessages(hdoc);
+    const ai = sm.filter(m => m.role === 'assistant');
+    ok(ai.length === 2, 'both assistant turns present');
+    ok(ai[0].content.indexOf('<docedits>') === -1 && ai[0].content.indexOf('first reply prose') !== -1
+        && ai[0].content.indexOf('omitted') !== -1,
+        'OLDER assistant reply: prose kept, raw JSON block stripped', ai[0].content);
+    ok(ai[1].content.indexOf('<docedits>') !== -1 && ai[1].content.indexOf('"find":"f2"') !== -1,
+        'LATEST assistant reply keeps its block verbatim (anti-re-proposal reference)');
+    ok(sm.filter(m => m.role !== 'system').every(m => m.content.indexOf('<supersede>') === -1), 'supersede tags stripped from resent history too (system protocol text exempt)');
+    // token meter must mirror what is actually sent
+    const cb = D.contextTokenBreakdown(hdoc);
+    const expHist = D.estTokens('u1') + D.estTokens('u2') + D.estTokens('u3')
+        + D.estTokens(D.stripOldProposalBlocks('first reply prose\n' + blk(1)))
+        + D.estTokens('second reply prose\n' + blk(2));
+    ok(cb.history === expHist, 'contextTokenBreakdown counts the STRIPPED older reply (meter matches the wire)', { got: cb.history, exp: expHist });
+    // negative: a single assistant message keeps its block; no block -> unchanged
+    const hdoc2 = D.ensureDocShape({ id: 'stripD2', name: 'S2', text: 'B', presetId: 'seed_pe_maker' });
+    D.sess(hdoc2).history.push({ role: 'user', content: 'x' }, { role: 'assistant', content: 'only reply ' + blk(9) });
+    const sm2 = D.buildMessages(hdoc2);
+    ok(sm2.filter(m => m.role === 'assistant')[0].content.indexOf('"find":"f9"') !== -1, 'single assistant reply: block kept');
+})();

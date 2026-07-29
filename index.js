@@ -1078,6 +1078,23 @@
         return out.trim();
     }
 
+    // For RESENDING history to the model (not display): an older assistant
+    // reply keeps its prose, but its raw <docedits> JSON is dead weight —
+    // live proposals are already summarized in [PENDING PROPOSALS] and
+    // consumed ones are history. With historyDepth 16 that is up to 15 full
+    // JSON blocks of pure token bloat per request. The LATEST assistant reply
+    // keeps its block verbatim so the model can see exactly what it last
+    // proposed (and avoid re-proposing it). Same span logic as the parser, so
+    // a prose mention of the tag can never desync what the model sees from
+    // what was applied.
+    function stripOldProposalBlocks(content) {
+        let out = String(content ?? '');
+        const b = findBlock(out, 'docedits');
+        if (b) out = out.slice(0, b.start) + '[earlier docedits block omitted \u2014 live proposals are summarized in [PENDING PROPOSALS]]' + out.slice(b.end);
+        out = out.replace(/<supersede>[\s\S]*?<\/supersede>/gi, '');
+        return out.trim();
+    }
+
     // Think extraction for ONE segment that contains no docedits block.
     function splitThinkingSegment(text) {
         let think = '';
@@ -1726,10 +1743,15 @@
         for (let i = base.length - 1; i >= 0; i--) {
             if (base[i].role === 'user') { lastUser = i; break; }
         }
+        let lastAssistant = -1;
+        for (let i = base.length - 1; i >= 0; i--) {
+            if (base[i].role === 'assistant') { lastAssistant = i; break; }
+        }
         const ctxExtra = [contextBlocks(doc), pendingProposalsBlock()].filter(Boolean).join('\n\n');
         base.forEach((h, i) => {
             let content = String(h.content ?? '');
             if (h.role === 'note') { msgs.push({ role: 'user', content: '[STATE] ' + content }); return; }
+            if (h.role === 'assistant' && i !== lastAssistant) content = stripOldProposalBlocks(content);
             if (i === lastUser) content = ctxExtra + '\n\n' + content;
             msgs.push({ role: h.role === 'assistant' ? 'assistant' : 'user', content });
         });
@@ -1768,10 +1790,24 @@
         const refsTotal = refs.reduce((n, r) => n + r.tokens, 0);
         const depth = Math.max(2, Number(settings.historyDepth) || 16);
         const win = pickContextWindow(sess(doc).history, depth);
+        // Mirror buildMessages exactly: older assistant replies are resent with
+        // their docedits block stripped, only the latest keeps it — the meter
+        // must count what is actually sent.
+        let lastAssistant = -1;
+        for (let i = win.length - 1; i >= 0; i--) {
+            if (win[i].role === 'assistant') { lastAssistant = i; break; }
+        }
         let history = 0, turns = 0, notes = 0;
-        for (const h of win) {
+        for (let i = 0; i < win.length; i++) {
+            const h = win[i];
             if (h.role === 'note') { history += estTokens('[STATE] ' + String(h.content ?? '')); notes++; }
-            else { history += estTokens(String(h.content ?? '')); turns++; }
+            else {
+                const c = (h.role === 'assistant' && i !== lastAssistant)
+                    ? stripOldProposalBlocks(h.content)
+                    : String(h.content ?? '');
+                history += estTokens(c);
+                turns++;
+            }
         }
         const proposals = estTokens(pendingProposalsBlock());
         return { system, doc: docTok, refs, refsTotal, history, turns, notes, proposals, winLen: win.length, total: system + docTok + refsTotal + history + proposals };
@@ -4432,7 +4468,7 @@
     // Engine internals exposed for automated testing (harmless in production).
     try {
         globalThis.__loreAgentDebug = {
-            VERSION, findBlock, parseDocEdits, stripBlocks, splitThinking, splitThinkingSegment,
+            VERSION, findBlock, parseDocEdits, stripBlocks, stripOldProposalBlocks, splitThinking, splitThinkingSegment,
             normChars, levenshtein, locate, applyEditToText, grow, mimeForName, resolveDocByName,
             ensureDocShape, sess, parseWorldbook, lintWorldbook, worldbookToST, docLooksLikeWorldbook,
             normalizePosition, positionToST,
