@@ -1739,7 +1739,20 @@
         // a document-editing task with no document — that guarantees hallucinated
         // "find" quotes and makes the context meter a lie.
         if (lastUser === -1) msgs.push({ role: 'user', content: ctxExtra });
-        return msgs;
+        // Strict-alternation providers (Bedrock-hosted Claude, some proxies)
+        // hard-400 on consecutive same-role messages; first-party APIs
+        // auto-combine them. [STATE] notes share the user role with real user
+        // turns, so runs of 2-3 consecutive user messages are routine after
+        // Apply operations. Merge adjacent same-role messages — semantically
+        // identical for providers that tolerate them, required for those that
+        // don't. (Elements are freshly built above, so in-place joins are safe.)
+        const merged = [];
+        for (const m of msgs) {
+            const last = merged[merged.length - 1];
+            if (last && last.role === m.role) last.content += '\n\n' + m.content;
+            else merged.push(m);
+        }
+        return merged;
     }
 
     // Estimate the total context this session sends on the next message — exactly

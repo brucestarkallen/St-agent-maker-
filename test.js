@@ -1075,3 +1075,33 @@ console.log('== spliceHistory: applied edits keep a [STATE] record ==');
     st.docs = st.docs.filter(d => d.id !== 'spliceD');
     D.setActiveDoc('');
 })();
+
+// ==================================================================
+// v0.14.2 — buildMessages: adjacent same-role messages are merged
+// ==================================================================
+console.log('== buildMessages: role merging (strict-alternation providers) ==');
+(function () {
+    const mdoc = D.ensureDocShape({ id: 'mergeD', name: 'Merge Doc', text: 'BODY', presetId: 'seed_pe_maker' });
+    const ms = D.sess(mdoc);
+    ms.history.push(
+        { role: 'user', content: 'u1' },
+        { role: 'assistant', content: 'a1' },
+        { role: 'note', content: 'Applied: 1 edit(s)' },
+        { role: 'note', content: 'second state note' },
+        { role: 'user', content: 'u2' },
+    );
+    const mm = D.buildMessages(mdoc);
+    // [system, user(u1), assistant(a1), user(note+note+ctxExtra+u2)] — the
+    // note/user run collapses into ONE user message.
+    ok(mm.length === 4, 'note/user run collapses: 4 messages (was 6)', mm.map(m => m.role));
+    ok(mm.map(m => m.role).join(',') === 'system,user,assistant,user', 'strict alternation achieved', mm.map(m => m.role));
+    const tail = mm[3].content;
+    ok(tail.indexOf('[STATE] Applied: 1 edit(s)') !== -1 && tail.indexOf('[STATE] second state note') !== -1
+        && tail.indexOf('[DOCUMENT: Merge Doc]') !== -1 && /u2\s*$/.test(tail),
+        'merged user message keeps both notes, the document, and the user text (in order)', tail);
+    // negative: nothing to merge -> message count and order unchanged
+    const mdoc2 = D.ensureDocShape({ id: 'mergeD2', name: 'M2', text: 'B', presetId: 'seed_pe_maker' });
+    D.sess(mdoc2).history.push({ role: 'user', content: 'x' }, { role: 'assistant', content: 'y' }, { role: 'user', content: 'z' });
+    const mm2 = D.buildMessages(mdoc2);
+    ok(mm2.length === 4 && mm2.map(m => m.role).join(',') === 'system,user,assistant,user', 'already-alternating history passes through untouched');
+})();
