@@ -944,3 +944,83 @@ console.log('== summaryception: lintTransplant mirrors the importer ==');
     r = L('<!-- SC-PIN {"label":"a>b"} bad -->');
     ok(r.issues.length === 1 && /Malformed/.test(r.issues[0].msg), 'unparseable sc- comment with > inside is flagged', JSON.stringify(r.issues));
 })();
+
+// ==================================================================
+// v0.14.2 — persisted staging area (pendingEdits per document)
+// ==================================================================
+console.log('== pendingEdits: persistence, restore, prune ==');
+(function () {
+    const st = D.getSettings();
+    // Two docs with sessions/history; docA carries a persisted staging area
+    // with: one APPLIED append (the double-apply sentinel), one pending edit,
+    // one edit stamped to a spliced-away message (dead), one stamped to a
+    // deleted session (neutralize), one unstamped.
+    const docA = D.ensureDocShape({ id: 'pdocA', name: 'Persist Doc A', text: 'body', presetId: 'seed_pe_maker' });
+    const docB = D.ensureDocShape({ id: 'pdocB', name: 'Persist Doc B', text: 'other', presetId: 'seed_pe_maker' });
+    D.sess(docA).history.push(
+        { role: 'user', content: 'q' },
+        { role: 'assistant', content: 'a', swipes: [{ content: 'a', think: '' }], swipeId: 0 },
+    );
+    docA.sessions.push({ id: 99, name: 'Doomed', history: [{ role: 'user', content: 'x' }] });
+    docA.pendingEdits = [
+        { type: 'append', replace: 'TAIL', status: 'applied', batch: 1, fromSess: 1, fromMsg: 1 },
+        { type: 'replace', find: 'body', replace: 'corpus', status: 'pending', batch: 2, fromSess: 1, fromMsg: 1 },
+        { type: 'append', replace: 'ghost', status: 'pending', batch: 3, fromSess: 1, fromMsg: 7 },   // dead: msg 7 spliced away
+        { type: 'append', replace: 'orphan', status: 'pending', batch: 4, fromSess: 42, fromMsg: 0 }, // session 42 never existed
+        { type: 'append', replace: 'free', status: 'pending', batch: 5 },                            // unstamped
+    ];
+    docA.sessions = docA.sessions.filter(s => s.id !== 99); // (kept shape valid; 42 never existed)
+    st.docs.push(docA, docB);
+
+    // Switching to docA restores its staging area, pruned of the dead stamp.
+    D.setActiveDoc(docA.id);
+    const restored = D.getPendingEdits();
+    ok(restored.length === 4, 'restore keeps live + neutralizable edits, drops dead-message stamp', restored.map(e => [e.replace, e.fromSess, e.fromMsg]));
+    ok(restored.some(e => e.replace === 'TAIL' && e.status === 'applied'), 'the APPLIED card survives the reload (dedupe memory intact)');
+    ok(!restored.some(e => e.replace === 'ghost'), 'edit stamped to a removed message is pruned');
+    const orphan = restored.find(e => e.replace === 'orphan');
+    ok(orphan && orphan.fromSess === null && orphan.fromMsg === -1, 'edit stamped to a missing session is neutralized, not dropped', orphan);
+    ok(docA.pendingEdits === restored, 'module array IS the document array (same reference)');
+
+    // Writes flow back to the document: reassignment via setPendingEdits cannot detach.
+    D.setPendingEdits(restored.concat([{ type: 'append', replace: 'new', status: 'pending', batch: 6 }]));
+    ok(docA.pendingEdits.length === 5 && docA.pendingEdits === D.getPendingEdits(), 'setPendingEdits writes through to the doc (reassignment-safe)');
+
+    // Switching away and back preserves the queue instead of wiping it.
+    D.setActiveDoc(docB.id);
+    ok(D.getPendingEdits().length === 0, 'doc with empty staging area restores empty');
+    D.setActiveDoc(docA.id);
+    ok(D.getPendingEdits().length === 5 && D.getPendingEdits().some(e => e.replace === 'new'), 'doc switch no longer discards the staging queue');
+
+    console.log('== reload: the v0.12.0 double-apply scenario through a restart ==');
+    // Simulate a full page reload: everything in memory is gone; what init
+    // does is loadSettings -> loadPendingFromDoc(activeDoc). The persisted
+    // doc.pendingEdits is the ONLY thing that comes back.
+    const reloaded = D.loadPendingFromDoc(docA);
+    ok(reloaded.length === 5 && reloaded.some(e => e.replace === 'TAIL' && e.status === 'applied'), 'reload restores the applied card from the doc');
+    // Now the user navigates back to the swipe whose edit was applied —
+    // mirrors the existing-swipe branch of swipeAssistant (test.js simSwipeNav).
+    function simSwipeNav2(pending, sid, idx, parsedEdits, seq2) {
+        pending = pending.filter(e => e.status !== 'pending' || !(e.fromSess === sid && e.fromMsg === idx));
+        const consumed = new Set(pending.filter(e => e.fromSess === sid && e.fromMsg === idx && e.status !== 'pending').map(D.editIdentityKey));
+        const fresh = parsedEdits.filter(e => !consumed.has(D.editIdentityKey(e)));
+        if (fresh.length) { seq2.n++; for (const e of fresh) { e.batch = seq2.n; e.fromSess = sid; e.fromMsg = idx; } pending = pending.concat(fresh); }
+        return pending;
+    }
+    const navSeq = { n: 100 };
+    const afterNav = simSwipeNav2(reloaded.slice(), 1, 1, [{ type: 'append', replace: 'TAIL', status: 'pending' }], navSeq);
+    ok(!afterNav.some(e => e.replace === 'TAIL' && e.status === 'pending'),
+        'REGRESSION: after a reload, swipe re-navigation must NOT resurrect the applied append as pending (double-apply stays dead)');
+    // Negative control: without the persisted consumed card the same nav WOULD
+    // resurrect it — proving the test actually exercises the dedupe.
+    const noMemory = simSwipeNav2([], 1, 1, [{ type: 'append', replace: 'TAIL', status: 'pending' }], navSeq);
+    ok(noMemory.some(e => e.replace === 'TAIL' && e.status === 'pending'), 'negative control: empty staging area WOULD re-stage it (dedupe is what saves us)');
+
+    // ensureDocShape backfills the new field for old saves / old backups.
+    const legacy = D.ensureDocShape({ id: 'pleg', name: 'Legacy', text: 'x' });
+    ok(Array.isArray(legacy.pendingEdits) && legacy.pendingEdits.length === 0, 'ensureDocShape backfills pendingEdits for pre-v0.14.2 docs');
+
+    // clean up so later settings-reading tests are unaffected
+    st.docs = st.docs.filter(d => d.id !== 'pdocA' && d.id !== 'pdocB');
+    D.setActiveDoc('');
+})();

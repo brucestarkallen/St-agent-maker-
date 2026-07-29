@@ -218,7 +218,7 @@
         batchLog: [],  // ids of applied batches, newest last (cross-doc undo)
         compareIds: [],           // docs selected in the compare view (max 4)
         compareLayout: 'columns', // 'columns' | 'stacked'
-        docs: [],      // [{id, name, text, updated, presetId, history, undo, refs}]
+        docs: [],      // [{id, name, text, updated, presetId, sessions, undo, refs, pendingEdits}]
         presets: [],   // [{id, name, prompt}]
     };
 
@@ -380,6 +380,10 @@
         if (!settings.docs.some(d => d.id === settings.activeDocId)) {
             settings.activeDocId = settings.docs[0]?.id || '';
         }
+        // Restore the active document's persisted staging area on load (reload
+        // no longer wipes un-applied proposals — or the consumed-status cards
+        // the double-apply dedupe depends on).
+        pendingEdits = loadPendingFromDoc(activeDoc());
     }
 
     function persist() {
@@ -404,6 +408,7 @@
         if (!d.sessions.some(sx => sx.id === d.activeSessionId)) d.activeSessionId = d.sessions[0].id;
         if (!Array.isArray(d.undo)) d.undo = [];
         if (!Array.isArray(d.refs)) d.refs = [];
+        if (!Array.isArray(d.pendingEdits)) d.pendingEdits = [];
         return d;
     }
 
@@ -430,7 +435,9 @@
 
     function setActiveDoc(id) {
         settings.activeDocId = id || '';
-        pendingEdits = [];
+        // Restore the newly-active document's OWN persisted staging area
+        // (pruned of dead stamps) instead of discarding the queue on switch.
+        pendingEdits = loadPendingFromDoc(activeDoc());
         editsCollapsed = false;
         persist();
     }
@@ -604,16 +611,61 @@
         return out;
     }
 
+    // The staging area is PERSISTED per document (v0.14.2) — proposals survive
+    // reloads and document switches, and so do the consumed-status cards that
+    // power the swipe re-navigation double-apply dedupe. The module-level
+    // `pendingEdits` is always the ACTIVE document's array; every reassignment
+    // (filter/concat produce NEW arrays) must go through setPendingEdits so the
+    // two can never detach, and in-place status mutations must be followed by
+    // persist().
+    function prunePendingEdits(doc, edits) {
+        // Drop stamps pointing at a (session, message) that no longer exists —
+        // the same rule the live splice-adjustment applies to removed messages.
+        // A stamp whose SESSION is gone is neutralized instead of dropped
+        // (matches deleteSession): the edit itself stays, only its provenance
+        // is forgotten.
+        const out = [];
+        for (const e of (edits || [])) {
+            if (!e || e.fromSess == null) { out.push(e); continue; }
+            const sx = doc && Array.isArray(doc.sessions) ? doc.sessions.find(s => s.id === e.fromSess) : null;
+            if (!sx) { e.fromSess = null; e.fromMsg = -1; out.push(e); continue; }
+            if (!Number.isInteger(e.fromMsg) || e.fromMsg < 0 || e.fromMsg >= sx.history.length) continue;
+            out.push(e);
+        }
+        return out;
+    }
+
+    function setPendingEdits(arr) {
+        pendingEdits = arr;
+        const d = activeDoc();
+        if (d) d.pendingEdits = arr;
+        persist();
+    }
+
+    function loadPendingFromDoc(doc) {
+        const arr = prunePendingEdits(doc, doc && Array.isArray(doc.pendingEdits) ? doc.pendingEdits : []);
+        if (doc) doc.pendingEdits = arr;
+        return arr;
+    }
+
     // Append an entry to a specific session, enforcing the 80-entry cap and
     // shifting/dropping proposal stamps when the cap splices the front. Used by
     // pushHistory (active session) and by the mid-generation switch path (the
-    // ORIGINATING session, which may no longer be active).
+    // ORIGINATING session, which may no longer be active — its stamps live in
+    // ITS document's persisted array, so adjust the OWNER's array, not blindly
+    // the active one).
     function appendToSession(sessObj, entry) {
         sessObj.history.push(entry);
         const over = sessObj.history.length - 80;
         if (over > 0) {
             sessObj.history.splice(0, over);
-            pendingEdits = adjustStampsForSplice(pendingEdits, sessObj.id, 0, over);
+            const owner = (settings.docs || []).find(d => Array.isArray(d.sessions) && d.sessions.includes(sessObj));
+            if (owner && owner.id === settings.activeDocId) {
+                setPendingEdits(adjustStampsForSplice(pendingEdits, sessObj.id, 0, over));
+            } else if (owner) {
+                owner.pendingEdits = adjustStampsForSplice(Array.isArray(owner.pendingEdits) ? owner.pendingEdits : [], sessObj.id, 0, over);
+                persist();
+            }
         }
         return entry;
     }
@@ -1380,7 +1432,7 @@
             // worse than a clean, recoverable failure.
             pushHistory(main, 'note', '\u26A0 ' + failed.length + ' proposal(s) could not be applied: the quoted excerpt was not found in the document. Copy the "find"/anchor text CHARACTER-FOR-CHARACTER from the current [DOCUMENT] and resend \u2014 do not paraphrase; if unsure of the exact wording, quote a shorter fragment you are certain is verbatim. Unmatched: ' + failed.map(e => '\u201C' + oneLine(String(e.find || '(no find text)')).slice(0, 48) + '\u201D').join('; ') + '.');
         }
-        if (changed.length || failed.length) {
+        if (changed.length || failed.length || autoResolved) {
             persist();
             renderHistory();
             updateSub();
@@ -1811,15 +1863,16 @@
                 const e = pendingEdits[n - 1];
                 if (e && e.status === 'pending') { e.status = 'superseded'; supersededCount++; }
             }
+            if (supersededCount) persist(); // in-place status mutations on the persisted array
             if (Number.isInteger(opts.swipeIdx)) {
                 // A swipe is an ALTERNATE version of one reply, not a new idea:
                 // replace that reply's cards (drop its old batch, stage the new).
-                pendingEdits = pendingEdits.filter(e => e.status !== 'pending' || !(e.fromSess === sessAtStart && e.fromMsg === opts.swipeIdx));
+                setPendingEdits(pendingEdits.filter(e => e.status !== 'pending' || !(e.fromSess === sessAtStart && e.fromMsg === opts.swipeIdx)));
                 if (parsed.edits.length) {
                     const auto = autoSupersedeConflicts(doc, parsed.edits);
                     editBatchSeq++;
                     for (const e of parsed.edits) { e.batch = editBatchSeq; e.fromSess = sessAtStart; e.fromMsg = opts.swipeIdx; }
-                    pendingEdits = pendingEdits.concat(parsed.edits);
+                    setPendingEdits(pendingEdits.concat(parsed.edits));
                     editsCollapsed = false;
                     if (auto) addBubble('note', '\u21A9 ' + auto + ' older pending proposal(s) targeted the same text \u2014 auto-superseded so Apply all cannot double-apply; the newest version wins.');
                 }
@@ -1833,7 +1886,7 @@
                 let srcIdx = srcSess.history.length - 1;
                 while (srcIdx >= 0 && srcSess.history[srcIdx].role !== 'assistant') srcIdx--;
                 for (const e of parsed.edits) { e.batch = editBatchSeq; e.fromSess = srcSess.id; e.fromMsg = srcIdx; }
-                pendingEdits = pendingEdits.concat(parsed.edits);
+                setPendingEdits(pendingEdits.concat(parsed.edits));
                 editsCollapsed = false;
                 if (auto) {
                     addBubble('note', '\u21A9 ' + auto + ' older pending proposal(s) targeted the same text \u2014 auto-superseded so Apply all cannot double-apply; the newest version wins.');
@@ -1878,7 +1931,7 @@
             renderHistory();
             const pe = parseDocEdits(entry.content);
             const sid = sess(doc).id;
-            pendingEdits = pendingEdits.filter(e => e.status !== 'pending' || !(e.fromSess === sid && e.fromMsg === idx));
+            setPendingEdits(pendingEdits.filter(e => e.status !== 'pending' || !(e.fromSess === sid && e.fromMsg === idx)));
             if (pe.edits.length) {
                 // Never re-stage a proposal from this reply that was already
                 // consumed (applied/skipped/superseded): navigating away and back
@@ -1894,7 +1947,7 @@
                     const auto = autoSupersedeConflicts(doc, fresh);
                     editBatchSeq++;
                     for (const e of fresh) { e.batch = editBatchSeq; e.fromSess = sid; e.fromMsg = idx; }
-                    pendingEdits = pendingEdits.concat(fresh);
+                    setPendingEdits(pendingEdits.concat(fresh));
                     editsCollapsed = false;
                     if (auto) addBubble('note', '\u21A9 ' + auto + ' older pending proposal(s) targeted the same text \u2014 auto-superseded; the newest version wins.');
                 }
@@ -1917,7 +1970,7 @@
         // (e.g. after an error), just generate for it.
         if (h.length && h[h.length - 1].role === 'user') { await runGeneration(); return; }
         if (i < 0) { toast('Nothing to retry yet.', 'warning'); return; }
-        pendingEdits = adjustStampsForSplice(pendingEdits, sess(doc).id, i, Infinity);
+        setPendingEdits(adjustStampsForSplice(pendingEdits, sess(doc).id, i, Infinity));
         h.splice(i);
         persist();
         renderHistory();
@@ -1933,7 +1986,7 @@
         let i = h.length - 1;
         while (i >= 0 && h[i].role !== 'user') i--;
         if (i < 0) { toast('Nothing to delete.', 'warning'); return; }
-        pendingEdits = adjustStampsForSplice(pendingEdits, sess(doc).id, i, Infinity);
+        setPendingEdits(adjustStampsForSplice(pendingEdits, sess(doc).id, i, Infinity));
         h.splice(i);
         persist();
         renderHistory();
@@ -1948,7 +2001,7 @@
         if (!h[idx] || h[idx].role !== 'user') return;
         if (idx < h.length - 1 && !confirm('Edit this message? Everything after it in this conversation will be removed.')) return;
         const text = h[idx].content;
-        pendingEdits = adjustStampsForSplice(pendingEdits, sess(doc).id, idx, Infinity);
+        setPendingEdits(adjustStampsForSplice(pendingEdits, sess(doc).id, idx, Infinity));
         h.splice(idx);
         persist();
         renderHistory();
@@ -1965,7 +2018,7 @@
         const h = sess(doc).history;
         if (!h[idx]) return;
         if (!confirm('Delete this message from the agent conversation?')) return;
-        pendingEdits = adjustStampsForSplice(pendingEdits, sess(doc).id, idx, 1);
+        setPendingEdits(adjustStampsForSplice(pendingEdits, sess(doc).id, idx, 1));
         h.splice(idx, 1);
         persist();
         renderHistory();
@@ -1978,7 +2031,7 @@
         if (!doc) return;
         const cur = sess(doc);
         if (!confirm('Clear session "' + cur.name + '" of "' + doc.name + '"? The document itself is untouched.')) return;
-        pendingEdits = adjustStampsForSplice(pendingEdits, cur.id, 0, Infinity);
+        setPendingEdits(adjustStampsForSplice(pendingEdits, cur.id, 0, Infinity));
         cur.history = [];
         persist();
         renderHistory();
@@ -3318,7 +3371,7 @@
             applyEdits(pendingEdits.filter(e => (e.batch || 0) === mb));
         });
         el('la_dismissall')?.addEventListener('click', () => {
-            pendingEdits = [];
+            setPendingEdits([]);
             renderEditCards();
         });
         el('la_toggleedits')?.addEventListener('click', () => {
@@ -3335,6 +3388,7 @@
             btn.addEventListener('click', () => {
                 const i = Number(btn.getAttribute('data-la-skip'));
                 pendingEdits[i].status = 'skipped';
+                persist(); // in-place status mutation on the persisted array
                 renderEditCards();
             });
         });
@@ -4354,6 +4408,7 @@
             adjustStampsForSplice, editIdentityKey, findAutoSuperseded, resolveSpanConflicts, buildBackupPayload, parseBackupPayload, mergeBackupIntoSettings, buildMessages, blockTokensFor, docBlock, refBlock,
             getSettings: () => settings,
             getPendingEdits: () => pendingEdits,
+            setPendingEdits, loadPendingFromDoc, prunePendingEdits, setActiveDoc,
         };
     } catch (e) { /* ignore */ }
 })();
