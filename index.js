@@ -4206,6 +4206,7 @@
         body.innerHTML = '';
         if (!doc) { body.textContent = 'Document no longer exists.'; return; }
         const entries = parseWorldbook(doc.text).entries;
+        const textAtRender = doc.text;
         const isNew = index == null;
         const e = isNew
             ? { name: (seed && seed.name) || '', keys: [], content: (seed && seed.content) || '', strategy: 'green', order: 100, position: 'after_char', depth: 4, probability: 100, comment: '' }
@@ -4295,11 +4296,31 @@
         const btnRow = document.createElement('div');
         btnRow.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;margin-top:14px;position:sticky;bottom:-10px;background:#1e1e1e;padding:8px 0;';
         const mkBtn = (label, bg) => { const b = document.createElement('button'); b.textContent = label; b.style.cssText = 'cursor:pointer;border:1px solid rgba(255,255,255,0.3);background:' + bg + ';color:inherit;border-radius:6px;padding:9px 14px;font-size:0.9em;'; return b; };
+        // Drift guard (v0.14.2): `entries` was parsed when this form opened.
+        // If the document changed since (agent Apply, Validate & repair,
+        // another overlay), serializing the STALE array would silently
+        // overwrite that change. Same entry count -> merge onto a fresh parse
+        // (the user's edit lives in the form fields, so nothing is lost);
+        // different shape -> explicit confirm before overwriting. Returns null
+        // to abort.
+        const resolveBaseEntries = () => {
+            if (doc.text === textAtRender) return entries;
+            const fresh = parseWorldbook(doc.text);
+            if (!fresh.error && fresh.entries.length === entries.length) return fresh.entries;
+            const nowDesc = fresh.error ? 'unparseable' : (fresh.entries.length + ' entries');
+            if (confirm('The document changed since this form opened (' + entries.length + ' entries then, ' + nowDesc + ' now). Overwrite it with this form\u2019s entries? OK = overwrite, Cancel = discard the form and reopen the list.')) {
+                return entries;
+            }
+            return null;
+        };
+
         const saveBtn = mkBtn(isNew ? 'Add entry' : 'Save entry', 'rgba(80,200,120,0.32)'); saveBtn.style.fontWeight = '700';
         const backBtn = mkBtn('\u2190 Back', 'rgba(255,255,255,0.1)');
         saveBtn.addEventListener('click', () => {
+            const base = resolveBaseEntries();
+            if (!base) { wbRenderList(win); return; }
             const ne = readForm();
-            const next = isNew ? entries.concat([ne]) : entries.map((x, i) => i === index ? ne : x);
+            const next = isNew ? base.concat([ne]) : base.map((x, i) => i === index ? ne : x);
             const before = doc.text;
             const after = serializeWorldbook(next);
             commitDocChanges([{ doc, before, after }], isNew ? 'Added worldbook entry' : 'Edited worldbook entry');
@@ -4313,8 +4334,10 @@
             const delBtn = mkBtn('\uD83D\uDDD1 Delete', 'rgba(220,80,80,0.28)');
             delBtn.addEventListener('click', () => {
                 if (!confirm('Delete entry "' + (e.name || '') + '" from the worldbook?')) return;
+                const base = resolveBaseEntries();
+                if (!base) { wbRenderList(win); return; }
                 const before = doc.text;
-                const after = serializeWorldbook(entries.filter((_, i) => i !== index));
+                const after = serializeWorldbook(base.filter((_, i) => i !== index));
                 commitDocChanges([{ doc, before, after }], 'Deleted worldbook entry');
                 toast('Deleted "' + (e.name || 'entry') + '".', 'info');
                 wbRenderList(win);
