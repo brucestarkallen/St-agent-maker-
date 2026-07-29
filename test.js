@@ -1142,3 +1142,16 @@ console.log('== buildMessages: old proposal blocks stripped, latest kept ==');
     const sm2 = D.buildMessages(hdoc2);
     ok(sm2.filter(m => m.role === 'assistant')[0].content.indexOf('"find":"f9"') !== -1, 'single assistant reply: block kept');
 })();
+
+// ==================================================================
+// v0.14.2 — extractText unwraps OpenAI-shaped responses
+// ==================================================================
+console.log('== extractText: choices unwrapping ==');
+(function () {
+    ok(D.extractText('plain') === 'plain', 'string passthrough');
+    ok(D.extractText({ content: 'c' }) === 'c', 'content string');
+    ok(D.extractText({ choices: [{ message: { content: 'chat answer' } }] }) === 'chat answer', 'choices[0].message.content unwrapped');
+    ok(D.extractText({ choices: [{ text: 'completion answer' }] }) === 'completion answer', 'choices[0].text unwrapped');
+    const fallback = D.extractText({ weird: true });
+    ok(typeof fallback === 'string' && fallback.indexOf('weird') !== -1, 'unknown shape still falls back to stringify (last resort)');
+})();

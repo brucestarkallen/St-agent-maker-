@@ -1554,6 +1554,13 @@
             return res.content.map(p => (typeof p === 'string' ? p : (p?.text || ''))).join('');
         }
         if (typeof res.text === 'string') return res.text;
+        // OpenAI-shaped wrappers: unwrap instead of stringifying the envelope
+        // into the agent's reply (and its persisted history).
+        if (Array.isArray(res.choices) && res.choices.length) {
+            const c0 = res.choices[0];
+            if (typeof c0?.message?.content === 'string') return c0.message.content;
+            if (typeof c0?.text === 'string') return c0.text;
+        }
         try { return JSON.stringify(res); } catch (e) { return String(res); }
     }
 
@@ -3187,7 +3194,10 @@
             const d0 = activeDoc();
             const n = d0 && Array.isArray(d0.undo) ? d0.undo.length : 0;
             ub.textContent = '\u21B6 Undo' + (n ? ' (' + n + ')' : '');
-            ub.disabled = !n;
+            // undoLast's primary path is the CROSS-DOC batch log — keep the
+            // button available whenever a batch exists even if this document's
+            // own stack is empty (e.g. a batch that touched only a reference).
+            ub.disabled = !n && !(Array.isArray(settings.batchLog) && settings.batchLog.length);
         }
         const sub = el('la_sub');
         if (!sub) return;
@@ -4469,7 +4479,7 @@
     try {
         globalThis.__loreAgentDebug = {
             VERSION, findBlock, parseDocEdits, stripBlocks, stripOldProposalBlocks, splitThinking, splitThinkingSegment,
-            normChars, levenshtein, locate, applyEditToText, grow, mimeForName, resolveDocByName,
+            normChars, levenshtein, locate, applyEditToText, grow, mimeForName, resolveDocByName, extractText,
             ensureDocShape, sess, parseWorldbook, lintWorldbook, worldbookToST, docLooksLikeWorldbook,
             normalizePosition, positionToST,
             numOr, estTokens, worldbookTokenStats, serializeWorldbook, pickContextWindow, contextTokenBreakdown,
