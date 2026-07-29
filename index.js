@@ -3813,8 +3813,8 @@
         return !p.error && p.entries.length > 0 && p.entries.some(e => e.keys.length || e.strategy === 'blue');
     }
 
-    function exportWorldbookST() {
-        const doc = activeDoc();
+    function exportWorldbookST(doc) {
+        doc = doc || activeDoc();
         if (!doc) { toast('No document selected.', 'warning'); return; }
         const p = parseWorldbook(doc.text);
         if (p.error) { toast('Not a valid worldbook: ' + p.error + ' \u2014 ask the agent to fix the JSON.', 'error'); return; }
@@ -3997,13 +3997,18 @@
 
         const btnRow = mk('div', 'display:flex;gap:8px;flex-wrap:wrap;margin-top:16px;');
         const mkBtn = (label, bg, fn) => { const b = mk('button', 'cursor:pointer;border:1px solid rgba(255,255,255,0.3);background:' + bg + ';color:inherit;border-radius:8px;padding:10px 14px;font-size:0.9em;', label); b.addEventListener('click', fn); return b; };
+        // Fixes act on the document THIS window was opened for — not whatever
+        // happens to be active at click time (same coupling class as the WB
+        // manager export; the backdrop makes it unreachable today, latent if
+        // the window is ever reused for a non-active doc).
+        const liveDoc = () => settings.docs.find(x => x.id === doc.id) || null;
         if (rpt.inlineCount > 0) btnRow.appendChild(mkBtn('Collapse ' + rpt.inlineCount + ' double-space' + (rpt.inlineCount > 1 ? 's' : ''), 'rgba(90,150,220,0.3)', () => {
-            const d = activeDoc(); if (!d) return;
+            const d = liveDoc(); if (!d) { toast('Document no longer exists.', 'warning'); return; }
             commitDocChanges([{ doc: d, before: d.text, after: collapseInlineSpaces(d.text) }], 'Collapsed inline double-spaces');
             toast('Collapsed double-spaces (undoable).', 'success'); showDocLint();
         }));
         if (rpt.jsonLike && rpt.jsonValid === false && rpt.jsonFixable) btnRow.appendChild(mkBtn('Repair JSON', 'rgba(90,200,120,0.3)', () => {
-            const d = activeDoc(); if (!d) return;
+            const d = liveDoc(); if (!d) { toast('Document no longer exists.', 'warning'); return; }
             const r = repairDocJson(d.text);
             if (!r.changed) { toast('Could not repair automatically.', 'warning'); return; }
             commitDocChanges([{ doc: d, before: d.text, after: r.text }], 'Repaired JSON format');
@@ -4127,7 +4132,7 @@
         const repairB = mkFlatBtn('\uD83D\uDD27 Validate & repair');
         repairB.addEventListener('click', () => { repairWorldbook(doc); wbRenderList(win); });
         const expB = mkFlatBtn('\uD83C\uDF10\u2192ST export');
-        expB.addEventListener('click', () => exportWorldbookST());
+        expB.addEventListener('click', () => exportWorldbookST(wbCurrentDoc(win)));
         const rawB = mkFlatBtn('{ } Raw JSON');
         rawB.addEventListener('click', () => { win.close(); viewDocRaw(doc.id); });
         [addB, fromB, repairB, expB, rawB].forEach(b => bar.appendChild(b));
