@@ -225,7 +225,10 @@
     // Valid default object from load so pre-init access (and the node test
     // harness, where init never runs) never hits a null; loadSettings()
     // reassigns this to the ctx-backed, persisted object in production.
-    let settings = Object.assign({}, defaults, { docs: [], presets: defaultPresets() });
+    // Fresh arrays for EVERY array-typed default: Object.assign is shallow, so
+    // omitting one would share the reference with `defaults` and leak pre-init
+    // writes into it.
+    let settings = Object.assign({}, defaults, { docs: [], presets: defaultPresets(), batchLog: [], compareIds: [] });
     let pendingEdits = [];   // [{type, find, replace, reason, docName, status, batch}]
     let editBatchSeq = 0;    // increments per accepted proposal block this session-view
     let editsCollapsed = false;
